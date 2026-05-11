@@ -652,7 +652,87 @@ class MainPanel(lf.ui.Panel):
             f.write("The result is an ECEF (Earth-Centered Earth-Fixed) coordinate in metres.\n")
 
         lf.log.info(f"geo_register: transform saved to '{out_file}'")
+
+        # COORDS_000.txt - UTM of Lichtfeld scene origin (0,0,0)
+        try:
+            self._save_coords_000(result, out_dir)
+        except Exception as _ce:
+            lf.log.warn(f"geo_register: COORDS_000.txt failed: {_ce}")
+
         return str(out_file), saved_csv
+
+    def _save_coords_000(self, result: dict, out_dir: "Path") -> None:
+        """Write COORDS_000.txt - UTM WGS84 of Lichtfeld scene origin (0,0,0).
+
+        The translation vector t is the ECEF coordinate of the scene origin
+        (because scale * R @ [0,0,0] + t = t).  We convert ECEF -> geodetic
+        -> UTM and write the result.
+        """
+        import math as _math
+        import numpy as _np
+
+        # --- ECEF translation -> geodetic ---
+        t_vec = _np.array(result["t"])
+        if hasattr(t_vec[0], "__len__"):
+            tx, ty, tz = float(t_vec[0][0]), float(t_vec[0][1]), float(t_vec[0][2])
+        else:
+            tx, ty, tz = float(t_vec[0]), float(t_vec[1]), float(t_vec[2])
+
+        from ..geo.ecef import ecef_to_geodetic
+        lat, lon, alt_m = ecef_to_geodetic(tx, ty, tz)
+
+        # --- geodetic -> UTM ---
+        _K0 = 0.9996
+        _A  = 6_378_137.0
+        _F  = 1.0 / 298.257223563
+        _N  = _F / (2.0 - _F)
+        _E2 = _F * (2.0 - _F)
+
+        lon_norm = lon % 360.0
+        zone   = int((lon_norm) / 6.0) % 60 + 1
+        hemi   = "S" if lat < 0.0 else "N"
+        epsg   = (32700 if lat < 0.0 else 32600) + zone
+        zone_code = str(zone) + hemi
+
+        # Karney 6th-order series forward
+        n2 = _N*_N; n3 = _N*n2; n4 = _N*n3; n5 = _N*n4; n6 = _N*n5
+        A0 = (_A/(1+_N))*(1 + n2/4 + n4/64)
+        alpha = [0,
+            (1/2)*_N - (2/3)*n2 + (5/16)*n3 + (41/180)*n4 - (127/288)*n5 + (7891/37800)*n6,
+            (13/48)*n2 - (3/5)*n3 + (557/1440)*n4 + (281/630)*n5 - (1983433/1935360)*n6,
+            (61/240)*n3 - (103/140)*n4 + (15061/26880)*n5 + (167603/181440)*n6,
+            (49561/161280)*n4 - (179/168)*n5 + (6601661/7257600)*n6,
+            (34729/80640)*n5 - (3418889/1995840)*n6,
+            (212378941/319334400)*n6,
+        ]
+        lon0_rad = _math.radians((zone-1)*6 - 180 + 3)
+        lat_rad  = _math.radians(lat)
+        lon_rad  = _math.radians(lon)
+        e = _math.sqrt(_E2)
+        p = lon_rad - lon0_rad
+        t_sinh = _math.sinh(_math.atanh(_math.sin(lat_rad))
+                            - e * _math.atanh(e * _math.sin(lat_rad)))
+        t_bar = _math.sqrt(1 + t_sinh**2)
+        xi0   = _math.atan2(t_sinh, _math.cos(p))
+        eta0  = _math.atanh(_math.sin(p) / t_bar)
+        xi    = xi0  + sum(alpha[j]*_math.sin(2*j*xi0)*_math.cosh(2*j*eta0) for j in range(1,7))
+        eta   = eta0 + sum(alpha[j]*_math.cos(2*j*xi0)*_math.sinh(2*j*eta0) for j in range(1,7))
+        easting  = _K0 * A0 * eta + 500_000.0
+        northing = _K0 * A0 * xi  + (10_000_000.0 if lat < 0.0 else 0.0)
+
+        out_dir.mkdir(parents=True, exist_ok=True)
+        txt_file = out_dir / "COORDS_000.txt"
+        content = (
+            str(epsg) + " " + f"{easting:.2f}" + " m E  "
+            + f"{northing:.2f}" + " m N  " + f"{alt_m:.0f}" + " m RL" + "\n"
+            + "Zone     : " + zone_code + "\n"
+            + "EPSG     : " + str(epsg) + "\n"
+            + "Lat      : " + f"{lat:+.8f}" + " deg\n"
+            + "Lon      : " + f"{lon:+.8f}" + " deg\n"
+            + "Alt      : " + f"{alt_m:.3f}" + " m\n"
+        )
+        txt_file.write_text(content, encoding="utf-8")
+        lf.log.info("geo_register: COORDS_000.txt saved -> " + str(txt_file))
 
     def _draw_export_section(self, layout, scale, theme) -> None:
         layout.separator()
