@@ -37,7 +37,8 @@ class MainPanel(lf.ui.Panel):
         self._transform: dict | None         = None
         self._picking: bool                  = False
         self._lla: tuple | None              = None   # (lat, lon, alt) from last pick
-        self._world_pos: tuple | None        = None   # local 3-D position of last pick
+        self._world_pos: tuple | None        = None
+        self._origin_utm: dict | None         = None   # UTM of scene origin (0,0,0)   # local 3-D position of last pick
         self._orig_images_folder: str | None = None   # override folder for EXIF scan
         self._export_splat_idx: int           = 0
         self._export_format_idx: int         = 0      # 0=LAS, 1=LAZ, 2=3D Tiles (SPZ)
@@ -212,10 +213,37 @@ class MainPanel(lf.ui.Panel):
         layout.label("Geographic Location (LLA WGS-84)")
         layout.text_colored(f"Lat : {lat:+.8f} deg", theme.palette.text_dim)
         layout.text_colored(f"Lon : {lon:+.8f} deg", theme.palette.text_dim)
-        layout.text_colored(f"Alt : {alt:.3f} m", theme.palette.text_dim)
+        layout.text_colored(f"Alt : {alt:.2f} m",    theme.palette.text_dim)
+
+        # UTM block
+        utm = self._lla_to_utm(lat, lon, alt)
+        if utm:
+            layout.spacing()
+            layout.label(f"UTM WGS-84  Zone {utm['zone_code']}  (EPSG:{utm['epsg']})")
+            layout.text_colored(f"Easting  : {utm['easting']:.2f} m",  theme.palette.text_dim)
+            layout.text_colored(f"Northing : {utm['northing']:.2f} m", theme.palette.text_dim)
+            layout.text_colored(f"RL (alt) : {utm['alt_m']:.2f} m",    theme.palette.text_dim)
+            layout.text_colored(
+                f"{utm['epsg']} {utm['easting']:.2f} m E  "
+                f"{utm['northing']:.2f} m N  {utm['alt_m']:.2f} m RL",
+                theme.palette.text_dim
+            )
+            # Delta from scene origin
+            orig = self._origin_utm
+            if orig:
+                layout.spacing()
+                layout.label("Delta from Scene Origin (0,0,0)")
+                layout.text_colored(f"Delta East  : {utm['easting']  - orig['easting']:.2f} m",  theme.palette.text_dim)
+                layout.text_colored(f"Delta North : {utm['northing'] - orig['northing']:.2f} m", theme.palette.text_dim)
+                layout.text_colored(f"Delta RL    : {utm['alt_m']    - orig['alt_m']:.2f} m",    theme.palette.text_dim)
+
         layout.spacing()
-        if layout.button_styled("Copy to Clipboard", "primary", (-1, 0)):
+        if layout.button_styled("Copy LLA to Clipboard", "primary", (-1, 0)):
             self._copy_lla()
+        if utm:
+            layout.spacing()
+            if layout.button_styled("Copy UTM to Clipboard", "primary", (-1, 0)):
+                self._copy_utm(utm)
         layout.spacing()
         if layout.button_styled("Clear Point", "error", (-1, 0)):
             self._clear_point()
@@ -273,6 +301,72 @@ class MainPanel(lf.ui.Panel):
         text = f"{lat:.8f}, {lon:.8f}, {alt:.3f}"
         lf.ui.set_clipboard_text(text)
         lf.log.info(f"geo_register: copied to clipboard: {text}")
+
+    def _lla_to_utm(self, lat: float, lon: float, alt_m: float) -> dict | None:
+        """Convert lat/lon/alt to a UTM dict using inline Karney series."""
+        import math as _math
+        _K0 = 0.9996
+        _A  = 6_378_137.0
+        _F  = 1.0 / 298.257223563
+        _N  = _F / (2.0 - _F)
+        _E2 = _F * (2.0 - _F)
+        try:
+            n2 = _N*_N; n3 = _N*n2; n4 = _N*n3; n5 = _N*n4; n6 = _N*n5
+            A0 = (_A/(1+_N))*(1 + n2/4 + n4/64)
+            alpha = [0,
+                (1/2)*_N   - (2/3)*n2  + (5/16)*n3   + (41/180)*n4  - (127/288)*n5  + (7891/37800)*n6,
+                (13/48)*n2 - (3/5)*n3  + (557/1440)*n4 + (281/630)*n5 - (1983433/1935360)*n6,
+                (61/240)*n3 - (103/140)*n4 + (15061/26880)*n5 + (167603/181440)*n6,
+                (49561/161280)*n4 - (179/168)*n5 + (6601661/7257600)*n6,
+                (34729/80640)*n5 - (3418889/1995840)*n6,
+                (212378941/319334400)*n6,
+            ]
+            zone      = int((lon + 180.0) / 6.0) % 60 + 1
+            hemi      = "S" if lat < 0.0 else "N"
+            epsg      = (32700 if lat < 0.0 else 32600) + zone
+            zone_code = str(zone) + hemi
+            lon0_rad  = _math.radians((zone - 1) * 6 - 180 + 3)
+            lat_rad   = _math.radians(lat)
+            lon_rad   = _math.radians(lon)
+            e         = _math.sqrt(_E2)
+            p         = lon_rad - lon0_rad
+            t_sinh    = _math.sinh(_math.atanh(_math.sin(lat_rad))
+                                   - e * _math.atanh(e * _math.sin(lat_rad)))
+            t_bar     = _math.sqrt(1 + t_sinh**2)
+            xi0       = _math.atan2(t_sinh, _math.cos(p))
+            eta0      = _math.atanh(_math.sin(p) / t_bar)
+            xi        = xi0  + sum(alpha[j]*_math.sin(2*j*xi0)*_math.cosh(2*j*eta0) for j in range(1,7))
+            eta       = eta0 + sum(alpha[j]*_math.cos(2*j*xi0)*_math.sinh(2*j*eta0) for j in range(1,7))
+            easting   = _K0 * A0 * eta + 500_000.0
+            northing  = _K0 * A0 * xi  + (10_000_000.0 if lat < 0.0 else 0.0)
+            return {
+                "easting": easting, "northing": northing, "alt_m": alt_m,
+                "zone": zone, "hemi": hemi, "zone_code": zone_code, "epsg": epsg,
+            }
+        except Exception as _e:
+            lf.log.warn(f"geo_register: UTM conversion failed: {_e}")
+            return None
+
+    def _copy_utm(self, utm: dict) -> None:
+        text = (
+            str(utm["epsg"]) + " "
+            + f"{utm['easting']:.2f}" + " m E  "
+            + f"{utm['northing']:.2f}" + " m N  "
+            + f"{utm['alt_m']:.2f}" + " m RL"
+        )
+        orig = self._origin_utm
+        if orig:
+            de = utm["easting"]  - orig["easting"]
+            dn = utm["northing"] - orig["northing"]
+            dr = utm["alt_m"]    - orig["alt_m"]
+            text += (
+                "\n"
+                + "Delta East  : " + f"{de:.2f}" + " m  ,  "
+                + "Delta North : " + f"{dn:.2f}" + " m  ,  "
+                + "Delta RL    : " + f"{dr:.2f}" + " m"
+            )
+        lf.ui.set_clipboard_text(text)
+        lf.log.info("geo_register: copied UTM to clipboard: " + text)
 
     def _pick_orig_images_folder(self):
         folder = lf.ui.open_folder_dialog(title="Select Original Images Folder")
@@ -719,16 +813,22 @@ class MainPanel(lf.ui.Panel):
         easting  = _K0 * A0 * eta + 500_000.0
         northing = _K0 * A0 * xi  + (10_000_000.0 if lat < 0.0 else 0.0)
 
+        # Store origin UTM for delta calculations at pick time
+        self._origin_utm = {
+            "easting": easting, "northing": northing, "alt_m": alt_m,
+            "zone": zone, "hemi": hemi, "zone_code": zone_code, "epsg": epsg,
+        }
+
         out_dir.mkdir(parents=True, exist_ok=True)
         txt_file = out_dir / "COORDS_000.txt"
         content = (
             str(epsg) + " " + f"{easting:.2f}" + " m E  "
-            + f"{northing:.2f}" + " m N  " + f"{alt_m:.0f}" + " m RL" + "\n"
+            + f"{northing:.2f}" + " m N  " + f"{alt_m:.2f}" + " m RL" + "\n"
             + "Zone     : " + zone_code + "\n"
             + "EPSG     : " + str(epsg) + "\n"
             + "Lat      : " + f"{lat:+.8f}" + " deg\n"
             + "Lon      : " + f"{lon:+.8f}" + " deg\n"
-            + "Alt      : " + f"{alt_m:.3f}" + " m\n"
+            + "Alt      : " + f"{alt_m:.2f}" + " m\n"
         )
         txt_file.write_text(content, encoding="utf-8")
         lf.log.info("geo_register: COORDS_000.txt saved -> " + str(txt_file))
