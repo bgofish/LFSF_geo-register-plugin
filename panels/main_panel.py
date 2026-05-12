@@ -688,8 +688,7 @@ class MainPanel(lf.ui.Panel):
         _N  = _F / (2.0 - _F)
         _E2 = _F * (2.0 - _F)
 
-        lon_norm = lon % 360.0
-        zone   = int((lon_norm) / 6.0) % 60 + 1
+        zone   = int((lon + 180.0) / 6.0) % 60 + 1
         hemi   = "S" if lat < 0.0 else "N"
         epsg   = (32700 if lat < 0.0 else 32600) + zone
         zone_code = str(zone) + hemi
