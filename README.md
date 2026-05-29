@@ -5,6 +5,11 @@ Once registered, clicking any point on the model returns its latitude, longitude
 The plugin can also export geo-referenced splat models as **LAS/LAZ** point clouds or
 **3D Tiles 1.1** datasets (ArcGIS Gaussian Splat Layer / CesiumJS).
 
+ADDED UTM INFORMATION IN THIS FORK:
+
+<img width="1698" height="1145" alt="image" src="https://github.com/user-attachments/assets/3a8b193b-91fe-45e1-9747-80ec174a731b" />
+
+
 ![Geo Register Plugin in action](assets/plugin_example.jpg)
 
 ---
